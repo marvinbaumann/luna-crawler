@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, send_file, url_for, jsonify
+from flask import Flask, request, render_template_string, send_file, url_for, jsonify, session
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urldefrag
@@ -8,23 +8,23 @@ import os
 import threading
 import time
 from datetime import datetime
+import uuid
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Für Session Handling notwendig
 app.static_folder = 'static'
 
-crawl_sessions = {}
+SESSIONS = {}  # Speichert Fortschritt je Session-ID
 LOG_FILE = "crawl_log.txt"
 EXCLUDED_EXTENSIONS = [
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico',
     '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.7z', '.mp4', '.mp3'
 ]
 
-
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
-
 
 def normalize_url(url, keep_query=True):
     parsed = urlparse(url)
@@ -34,30 +34,27 @@ def normalize_url(url, keep_query=True):
         parsed = parsed._replace(query="", fragment="")
     return parsed.geturl()
 
-
 def is_valid_html_response(response):
     content_type = response.headers.get('Content-Type', '')
     return response.status_code == 200 and 'text/html' in content_type.lower()
 
-
 def is_excluded(url):
     return any(url.lower().endswith(ext) for ext in EXCLUDED_EXTENSIONS)
 
-
-def crawl_website(session_id, start_url):
+def crawl_website(start_url, session_id):
     visited = set()
     queue = [start_url]
     base_domain = urlparse(start_url).netloc
     found_paths = []
 
-    crawl_sessions[session_id] = {
+    SESSIONS[session_id] = {
         "status": "running",
         "current": "",
         "found": 0,
         "results": []
     }
 
-    log(f"Crawl gestartet für Domain: {start_url}")
+    log(f"Crawl gestartet für Domain: {start_url} [Session {session_id}]")
 
     while queue:
         url = queue.pop(0)
@@ -65,12 +62,12 @@ def crawl_website(session_id, start_url):
         if clean_url in visited or is_excluded(clean_url):
             continue
         try:
-            crawl_sessions[session_id]["current"] = clean_url
+            SESSIONS[session_id]["current"] = clean_url
             response = requests.get(url, timeout=5)
             if is_valid_html_response(response):
                 visited.add(clean_url)
                 found_paths.append(clean_url)
-                crawl_sessions[session_id]["found"] = len(found_paths)
+                SESSIONS[session_id]["found"] = len(found_paths)
                 soup = BeautifulSoup(response.text, 'html.parser')
                 for link in soup.find_all('a', href=True):
                     href = link['href']
@@ -82,13 +79,12 @@ def crawl_website(session_id, start_url):
         except:
             continue
 
-    crawl_sessions[session_id]["status"] = "done"
-    crawl_sessions[session_id]["results"] = sorted(set(found_paths))
+    SESSIONS[session_id]["status"] = "done"
+    SESSIONS[session_id]["results"] = sorted(set(found_paths))
 
-    log(f"Crawl beendet für {start_url} – Gefundene Seiten: {len(found_paths)}")
-    for p in crawl_sessions[session_id]["results"]:
+    log(f"Crawl beendet für {start_url} – Gefundene Seiten: {len(found_paths)} [Session {session_id}]")
+    for p in SESSIONS[session_id]["results"]:
         log(f"  - {p}")
-
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -104,27 +100,21 @@ HTML_TEMPLATE = """
         details ul { margin-left: 20px; }
     </style>
     <script>
-        let sessionId = Math.random().toString(36).substring(2);
-
-        document.addEventListener("DOMContentLoaded", function() {
-            const form = document.getElementById("crawlForm");
-            form.addEventListener("submit", function(e) {
-                e.preventDefault();
-                const domain = document.getElementById('domain').value;
-                document.getElementById('status').innerText = 'Starte Crawl...';
-                fetch('/start_crawl', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ domain: domain, session: sessionId })
-                });
-                pollStatus();
+        function startCrawl() {
+            const domain = document.getElementById('domain').value;
+            document.getElementById('status').innerText = 'Starte Crawl...';
+            fetch('/start_crawl', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domain: domain })
             });
-        });
+            pollStatus();
+        }
 
         function pollStatus() {
-            fetch(`/status?session=${sessionId}`).then(r => r.json()).then(data => {
+            fetch('/status').then(r => r.json()).then(data => {
                 if (data.status === 'done') {
-                    window.location.href = `/?session=${sessionId}`;
+                    window.location.href = '/';
                 } else {
                     document.getElementById('status').innerText =
                         `Status: ${data.status} | Gefunden: ${data.found} | Aktuell: ${data.current}`;
@@ -137,7 +127,7 @@ HTML_TEMPLATE = """
 <body>
     <img src=\"{{ url_for('static', filename='horizontal_logo_black.png') }}\" alt=\"Luna Logo\" class=\"logo\">
     <h1>Luna Webcrawler & Angebotsrechner</h1>
-    <form id=\"crawlForm\">
+    <form onsubmit=\"event.preventDefault(); startCrawl();\">
         <label for=\"domain\">Domain eingeben (inkl. https://):</label>
         <input type=\"text\" name=\"domain\" id=\"domain\" required>
         <button type=\"submit\">Crawlen</button>
@@ -180,10 +170,14 @@ def calculate_package(num_pages):
         price = 18000 + (extra_blocks * 1000)
         return "Enterprise", f"{price:,} €".replace(",", "."), "1.997 €/Monat"
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def index():
-    session = request.args.get("session")
-    data = crawl_sessions.get(session)
+    session_id = session.get("id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        session["id"] = session_id
+
+    data = SESSIONS.get(session_id)
     if data and data["status"] == "done":
         urls = data["results"]
         package, price, monthly = calculate_package(len(urls))
@@ -193,21 +187,24 @@ def index():
 @app.route('/start_crawl', methods=['POST'])
 def start_crawl():
     import json
-    data = request.get_json()
-    domain = data.get("domain")
-    session = data.get("session")
-    thread = threading.Thread(target=crawl_website, args=(session, domain))
+    session_id = session.get("id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        session["id"] = session_id
+
+    domain = request.get_json().get("domain")
+    thread = threading.Thread(target=crawl_website, args=(domain, session_id))
     thread.start()
     return '', 204
 
 @app.route('/status')
 def status():
-    session = request.args.get("session")
-    progress = crawl_sessions.get(session, {})
+    session_id = session.get("id")
+    data = SESSIONS.get(session_id, {"status": "idle", "current": "", "found": 0})
     return jsonify({
-        "status": progress.get("status", "idle"),
-        "current": progress.get("current", ""),
-        "found": progress.get("found", 0)
+        "status": data["status"],
+        "current": data["current"],
+        "found": data["found"]
     })
 
 @app.route('/download', methods=['POST'])
@@ -222,4 +219,6 @@ def download():
     return send_file(io.BytesIO(output.read().encode('utf-8')), mimetype='text/csv', as_attachment=True, download_name='unterseiten_luna.csv')
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=10000)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)

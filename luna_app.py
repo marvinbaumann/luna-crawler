@@ -1,30 +1,29 @@
 from flask import Flask, request, render_template_string, send_file, url_for, jsonify, session
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse
 import csv
 import io
 import os
 import threading
-import time
 from datetime import datetime
 import uuid
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # Für Session Handling notwendig
+app.secret_key = os.urandom(24)
 app.static_folder = 'static'
 
-SESSIONS = {}  # Speichert Fortschritt je Session-ID
+SESSIONS = {}
 LOG_FILE = "crawl_log.txt"
-EXCLUDED_EXTENSIONS = [
-    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico',
-    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.7z', '.mp4', '.mp3'
-]
+EXCLUDED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico',
+                       '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.7z', '.mp4', '.mp3']
+
 
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
+
 
 def normalize_url(url, keep_query=True):
     parsed = urlparse(url)
@@ -34,12 +33,15 @@ def normalize_url(url, keep_query=True):
         parsed = parsed._replace(query="", fragment="")
     return parsed.geturl()
 
+
 def is_valid_html_response(response):
     content_type = response.headers.get('Content-Type', '')
     return response.status_code == 200 and 'text/html' in content_type.lower()
 
+
 def is_excluded(url):
     return any(url.lower().endswith(ext) for ext in EXCLUDED_EXTENSIONS)
+
 
 def crawl_website(start_url, session_id):
     visited = set()
@@ -86,6 +88,7 @@ def crawl_website(start_url, session_id):
     for p in SESSIONS[session_id]["results"]:
         log(f"  - {p}")
 
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang=\"en\">
@@ -99,35 +102,11 @@ HTML_TEMPLATE = """
         details summary { cursor: pointer; font-weight: bold; margin-bottom: 10px; }
         details ul { margin-left: 20px; }
     </style>
-    <script>
-        function startCrawl() {
-            const domain = document.getElementById('domain').value;
-            document.getElementById('status').innerText = 'Starte Crawl...';
-            fetch('/start_crawl', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ domain: domain })
-            });
-            pollStatus();
-        }
-
-        function pollStatus() {
-            fetch('/status').then(r => r.json()).then(data => {
-                if (data.status === 'done') {
-                    window.location.href = '/';
-                } else {
-                    document.getElementById('status').innerText =
-                        `Status: ${data.status} | Gefunden: ${data.found} | Aktuell: ${data.current}`;
-                    setTimeout(pollStatus, 1000);
-                }
-            });
-        }
-    </script>
 </head>
 <body>
     <img src=\"{{ url_for('static', filename='horizontal_logo_black.png') }}\" alt=\"Luna Logo\" class=\"logo\">
     <h1>Luna Webcrawler & Angebotsrechner</h1>
-    <form onsubmit=\"event.preventDefault(); startCrawl();\">
+    <form id=\"crawlForm\">
         <label for=\"domain\">Domain eingeben (inkl. https://):</label>
         <input type=\"text\" name=\"domain\" id=\"domain\" required>
         <button type=\"submit\">Crawlen</button>
@@ -154,6 +133,38 @@ HTML_TEMPLATE = """
             <button type=\"submit\">CSV herunterladen</button>
         </form>
     {% endif %}
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const form = document.getElementById('crawlForm');
+            form.addEventListener('submit', function (e) {
+                e.preventDefault();
+                startCrawl();
+            });
+        });
+
+        function startCrawl() {
+            const domain = document.getElementById('domain').value;
+            document.getElementById('status').innerText = 'Starte Crawl...';
+            fetch('/start_crawl', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domain: domain })
+            });
+            pollStatus();
+        }
+
+        function pollStatus() {
+            fetch('/status').then(r => r.json()).then(data => {
+                if (data.status === 'done') {
+                    window.location.href = '/';
+                } else {
+                    document.getElementById('status').innerText =
+                        `Status: ${data.status} | Gefunden: ${data.found} | Aktuell: ${data.current}`;
+                    setTimeout(pollStatus, 1000);
+                }
+            });
+        }
+    </script>
 </body>
 </html>
 """
@@ -219,6 +230,5 @@ def download():
     return send_file(io.BytesIO(output.read().encode('utf-8')), mimetype='text/csv', as_attachment=True, download_name='unterseiten_luna.csv')
 
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)

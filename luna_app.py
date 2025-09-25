@@ -136,10 +136,12 @@ HTML_TEMPLATE = """
     <script>
         document.addEventListener('DOMContentLoaded', function () {
             const form = document.getElementById('crawlForm');
-            form.addEventListener('submit', function (e) {
-                e.preventDefault();
-                startCrawl();
-            });
+            if (form) {
+                form.addEventListener('submit', function (e) {
+                    e.preventDefault();
+                    startCrawl();
+                });
+            }
         });
 
         function startCrawl() {

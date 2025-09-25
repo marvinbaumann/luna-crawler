@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, send_file, url_for, jsonify
+from flask import Flask, request, render_template_string, send_file, url_for, jsonify, session
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urldefrag
@@ -8,17 +8,13 @@ import os
 import threading
 import time
 from datetime import datetime
+import uuid
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Für Session Handling notwendig
 app.static_folder = 'static'
 
-crawl_progress = {
-    "status": "idle",
-    "current": "",
-    "found": 0,
-    "results": []
-}
-
+SESSIONS = {}  # Speichert Fortschritt je Session-ID
 LOG_FILE = "crawl_log.txt"
 EXCLUDED_EXTENSIONS = [
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico',
@@ -45,18 +41,20 @@ def is_valid_html_response(response):
 def is_excluded(url):
     return any(url.lower().endswith(ext) for ext in EXCLUDED_EXTENSIONS)
 
-def crawl_website(start_url):
+def crawl_website(start_url, session_id):
     visited = set()
     queue = [start_url]
     base_domain = urlparse(start_url).netloc
     found_paths = []
 
-    crawl_progress["status"] = "running"
-    crawl_progress["current"] = ""
-    crawl_progress["found"] = 0
-    crawl_progress["results"] = []
+    SESSIONS[session_id] = {
+        "status": "running",
+        "current": "",
+        "found": 0,
+        "results": []
+    }
 
-    log(f"Crawl gestartet für Domain: {start_url}")
+    log(f"Crawl gestartet für Domain: {start_url} [Session {session_id}]")
 
     while queue:
         url = queue.pop(0)
@@ -64,12 +62,12 @@ def crawl_website(start_url):
         if clean_url in visited or is_excluded(clean_url):
             continue
         try:
-            crawl_progress["current"] = clean_url
+            SESSIONS[session_id]["current"] = clean_url
             response = requests.get(url, timeout=5)
             if is_valid_html_response(response):
                 visited.add(clean_url)
                 found_paths.append(clean_url)
-                crawl_progress["found"] = len(found_paths)
+                SESSIONS[session_id]["found"] = len(found_paths)
                 soup = BeautifulSoup(response.text, 'html.parser')
                 for link in soup.find_all('a', href=True):
                     href = link['href']
@@ -81,11 +79,11 @@ def crawl_website(start_url):
         except:
             continue
 
-    crawl_progress["status"] = "done"
-    crawl_progress["results"] = sorted(set(found_paths))
+    SESSIONS[session_id]["status"] = "done"
+    SESSIONS[session_id]["results"] = sorted(set(found_paths))
 
-    log(f"Crawl beendet für {start_url} – Gefundene Seiten: {len(found_paths)}")
-    for p in crawl_progress["results"]:
+    log(f"Crawl beendet für {start_url} – Gefundene Seiten: {len(found_paths)} [Session {session_id}]")
+    for p in SESSIONS[session_id]["results"]:
         log(f"  - {p}")
 
 HTML_TEMPLATE = """
@@ -174,8 +172,14 @@ def calculate_package(num_pages):
 
 @app.route('/', methods=['GET'])
 def index():
-    if crawl_progress["status"] == "done":
-        urls = crawl_progress["results"]
+    session_id = session.get("id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        session["id"] = session_id
+
+    data = SESSIONS.get(session_id)
+    if data and data["status"] == "done":
+        urls = data["results"]
         package, price, monthly = calculate_package(len(urls))
         return render_template_string(HTML_TEMPLATE, results=urls, package=package, price=price, monthly=monthly)
     return render_template_string(HTML_TEMPLATE, results=None, package=None, price=None, monthly=None)
@@ -183,17 +187,24 @@ def index():
 @app.route('/start_crawl', methods=['POST'])
 def start_crawl():
     import json
+    session_id = session.get("id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        session["id"] = session_id
+
     domain = request.get_json().get("domain")
-    thread = threading.Thread(target=crawl_website, args=(domain,))
+    thread = threading.Thread(target=crawl_website, args=(domain, session_id))
     thread.start()
     return '', 204
 
 @app.route('/status')
 def status():
+    session_id = session.get("id")
+    data = SESSIONS.get(session_id, {"status": "idle", "current": "", "found": 0})
     return jsonify({
-        "status": crawl_progress["status"],
-        "current": crawl_progress["current"],
-        "found": crawl_progress["found"]
+        "status": data["status"],
+        "current": data["current"],
+        "found": data["found"]
     })
 
 @app.route('/download', methods=['POST'])
@@ -207,8 +218,7 @@ def download():
     output.seek(0)
     return send_file(io.BytesIO(output.read().encode('utf-8')), mimetype='text/csv', as_attachment=True, download_name='unterseiten_luna.csv')
 
-import os
-
 if __name__ == '__main__':
+    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
